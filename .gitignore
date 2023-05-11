@@ -1,0 +1,9 @@
+# directories
+build
+.vscode
+
+# files
+Sample.txt
+shaders/vert.spv
+shaders/frag.spv
+assets/image/fixed_functions.svg
