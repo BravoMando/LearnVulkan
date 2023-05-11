@@ -182,7 +182,7 @@ This repository does NOT have a build-system yet, but you can modify the CMakeLi
     12. complete pipeline layout create info struct and create a pipeline layout
         + `.setLayoutCount` is the number of descriptor sets included in the pipeline layout.
         + `.pSetLayouts` is a pointer to an array of `VkDescriptorSetLayout` objects.
-        + `.pushConstantRangeCount` is the number of push constant ranges included in the pipeline layout.
+        + `.pushConstantRangeCount` is the number of push constant ranges included in the pipeline layout. Push constants is another way of passing dynamic values to shaders.
         + `.pPushConstantRanges` is a pointer to an array of `VkPushConstantRange` structures defining a set of push constant ranges for use in a single pipeline layout. In addition to descriptor set layouts, a pipeline layout also describes how many push constants can be accessed by each stage of the pipeline.
     13. at last, complete graphics pipeline create info struct
         1. shader stages
@@ -252,10 +252,10 @@ This repository does NOT have a build-system yet, but you can modify the CMakeLi
     + If `vkAcquireNextImageKHR` returns `VK_ERROR_OUT_OF_DATE_KHR`, we should recreate our swap chain. If it returns `VK_SUBOPTIMAL_KHR`, we could also recreate swap chain for we may want the best possible result.
 + Right after acquireing image, we shall reset the fence by function `vkResetFences`.
 + With the image index specifying swap chain image to use in hand, we can now record command buffer.
-    + First, we will reset command buffer to make sure it is able to be recoreded by call `vkResetCommandBuffer` function.
+    + First, we will reset command buffer to make sure it is able to be recorded by call `vkResetCommandBuffer` function.
     The last parameter controls the reset operation. Its possible values are as follows:
         `VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT` specifies that most or all memory resources currently owned by the command buffer should be returned to the parent command pool. If this flag is not set, then the command buffer may hold onto memory resources and reuse them when recording commands.
-    `0` behaves as forementioned.
+        `0` behaves as forementioned.
     + Now we can record our command buffer.
         + complete command buffer begin info struct
             + `.flags` specifies how we're going to use the command buffer. The following values are available:
@@ -328,3 +328,262 @@ This repository does NOT have a build-system yet, but you can modify the CMakeLi
 + clean up swap chain and create swap chain, create image views, create framebuffers.
 
 ![Triangle](./assets/screan_shot/FirstTriangle.png "First Triangle")
+
+## Buffer Stuff
+**Note** that you should create vertex/index/uniform buffers before you have created command buffer.
+
+### vertex input description
++ Now we want the vertex data to be soft code, and to do this we need to create vertex buffer. First and foremost, change the vertex shader code and specify the vertex input descriptions including binding description(describes at which rate to load data from memory throughout the vertices) and attribute descriptions(describes how to extract a vertex attribute from a chunk of vertex data originating from a binding description).
+```glsl
+#version 450
+layout(location = 0) in vec2 inPosition;
+layout(location = 1) in vec3 inColor;
+layout(location = 0) out vec3 fragColor;
+void main() {
+    gl_Position = vec4(inPosition,0.0f,1.0f);
+    fragColor = inColor;
+}
+```
++ Define a vertex struct including vertex data, vertex input binding description and vertex input attribute description so that we can make things easier.
+```c++
+struct Vertex
+{
+    glm::vec2 pos;
+    glm::vec3 color;
+
+    static VkVertexInputBindingDescription getBindingDescription();
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions();
+};
+```
++ complete vertex input binding description struct
+    + `.binding` specifies the index of the binding in the array of bindings.
+    + `.stride` specifies the size in bytes of each vertex.
+    + `.inputRate` is a `VkVertexInputRate` value specifying whether vertex attribute addressing is a function of the vertex index or of the instance index.
+        `VK_VERTEX_INPUT_RATE_VERTEX`:Move to the next data entry after each vertex index.
+        `VK_VERTEX_INPUT_RATE_INSTANCE`:Move to the next data entry after each instance index.
++ complete vertex input attribute description struct
+    + `.binding` tells Vulkan from which binding the per-vertex data comes.
+    + `.location` references the `location` directive of the input in the vertex shader.
+    + `.format` describes the type of data for the attribute. Some commonly used type are as follows:
+        `ivec2`:`VK_FORMAT_R32G32_SINT`, a 2-component vector of 32-bit signed integers
+        `uvec4`:`VK_FORMAT_R32G32B32A32_UINT`, a 4-component vector of 32-bit unsigned integers
+        `double`:`VK_FORMAT_R64_SFLOAT`, a double-precision (64-bit) float
+        `float`:`VK_FORMAT_R32_SFLOAT`
+        `vec2`:`VK_FORMAT_R32G32_SFLOAT`
+        `vec3`:`VK_FORMAT_R32G32B32_SFLOAT`
+        `vec4`:`VK_FORMAT_R32G32B32A32_SFLOAT`
+    + `.offset` specifies the offset in bytes of each attribute of the per-vertex data.
++ set up the graphics pipeline to accept vertex data at the stage of `VkPipelineVertexInputStateCreateInfo`
+```c++
+    auto bindingDescriptions = Vertex::getBindingDescription();
+    auto attributeDescriptions = Vertex::getAttributeDescriptions();
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &bindingDescriptions;
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+```
+### staging buffer
++ When vertex descriptions are all settled, we could create vertex buffer then allocate vertex buffer memory and bind vertex buffer directly. However, we can use a staging buffer allocated on CPU/host to upload vertex data to vertex buffer whose memory is supposed to be allocated on GPU/device to get the most optimal memory for the best performance. Thus, it comes out we need to support transfer operation to achieve buffer copy. The good news is that any queue family with `VK_QUEUE_GRAPHICS_BIT` or `VK_QUEUE_COMPUTE_BIT` capabilities already implicitly support `VK_QUEUE_TRANSFER_BIT` operations.
++ abstracting buffer creation by the following properties
+    + `VkDeviceSize` specifies the buffer size
+    + `VkBufferUasgeFlags` specifies the buffer usage
+    + `VkMemoryPropertyFlags` specifies the properties of memory type which define special features of the memory, like being able to map it so we can write to it from the CPU/host.
++ create buffer--create buffer, allocate buffer memory, bind buffer and memory
+    + complete buffer create info struct, then create buffer (`VkDeviceSize`&`VkBufferUsageFlags` required)
+    + get buffer memory requirements by function `vkGetBufferMemoryRequirements`
+        + The `VkMemoryRequirements` struct has three fields:
+        + `.size`:The size of the required amount of memory in bytes, **may differ from `bufferCreateInfo.size`**.
+        + `.alignment`:The offset in bytes where the buffer begins in the allocated region of memory, depends on `bufferCreateInfo.usage` and `bufferCeateInfo.flags`.
+        + `.memoryTypeBits`:It is a bitmask and contains one bit set for every supported memory type for the resource. Bit `i` is set if and only if the memory type `i` in the `VkPhysicalDeviceMemoryProperties` structure for the physical device is supported for the resource.
+    + complete memory allocate info struct, then allocate memory by function `vkAllocateMemory`
+        + `.allocationSize` specifies the size of the required amount of memory in bytes
+        + `.memoryTypeIndex` is an index identifying a memory type from the `memoryTypes`array of the `VkPhysicalDeviceMemoryProperties` structure.(How to find the index?$\Downarrow$)
+    + find the memory type index (`VkMemoryPropertyFlags` required)
+        + get physical device memory properties by function `vkGetPhysicalDeviceMemoryProperties`. The `VkPhysicalDeviceMemoryProperties` structure has two arrays `memoryTypes` and `memoryHeaps`, and for now we will only concern the type of memory.
+        + Remember the `VkMemoryRequirements` we have gotten, whose member `memoryTypeBits` contains the the memory types that are suitable for the buffer. So we make it as a filter to find the memory type index. Because `memoryTypeBits` only contains one bit set for every supported memory type for the resource, we could find the index of a suitable memory type by checking if the corresponding bit is set to `1`.
+        ```c++
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+        {
+            if ((/*VkMemoryRequirements.memoryTypeBits*/typeFilter & (1 << i)))
+                return i;
+        }
+        ```
+        + However, we are not just interested in a memory type that is suitable for vertex buffer. We also need to enable our needed features.
+        ```c++
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+        {
+            if ((/*VkMemoryRequirements.memoryTypeBits*/typeFilter & (1 << i)) &&
+                (memProperties.memoryTypes[i].propertyFlags & /*VkMemoryPropertyFlags*/properties) == properties)
+                return i;
+        }
+        ```
+    + after allocating memory, bind buffer and memory bu function `vkBindBufferMemory`
++ copy buffer
+    ```c++
+    void copyBuffer(VkBuffer dstBuffer, VkBuffer srcBuffer, VkDeviceSize size);
+    ```
+    + Memory transfer operations are executed using command buffers, just like drawing commands. Therefore we will create a temporary command buffer to be recorded for we just copy buffer once.
+        + allocate temporary command buffer
+            + `VkCommandBufferAllocateInfo`
+            + `vkAllocateCommandBuffers`
+        + record temporary command buffer
+            + `VkCommandBufferBeginInfo` Note that we only use the command buffer for once, so we could explicitly set the flags to `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT`.
+            + `vkBeginCommandBuffer`
+            + `VkBufferCopy` specifies the copy regin
+            + `vkCmdCopyBuffer`
+            + `vkEndCommandBuffer`
+            + `VkSubmitInfo`
+            + `vkQueueSubmit`
+            + `vkQueueWaitIdle`
+            + `vkFreeCommandBuffers` We only use the command buffer for once.
+### vertex buffer
++ With the abstraction and pre-work above, we can easily create vertex buffer.
+    + calculate the buffer size and create staging buffer
+        + `usage`$\Leftarrow$`VK_BUFFER_USAGE_TRANSFER_SRC_BIT`
+        + `properties`$\Leftarrow$`VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT`
+    + copy the vertex data to the staging buffer by mapping the buffer memory into CPU accessible memory with function `vkMapMemory`
+        + `flags` is reserved for future use
+        + the last parameter `void **data` specifies the output for the pointer to the mapped memory
+        + copy the vertex data to the mapped memory by function `memcpy` and unmapp it with function `vkUnmapMemory`
+    + create vertex buffer
+        + `usage`$\Leftarrow$`VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT`
+        + `properties`$\Leftarrow$`VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT`
+    + copy buffer
+    + destroy staging buffer and free staging buffer memory
++ don't forget to bind the vertex buffer after you bind the pipeline when you `recordCommandBuffer`
++ destroy vertex buffer when you clean up
++ free vertex buffer memory when you clean up
+### index buffer
++ just like create vertex buffer, but you don't need descriptions for input state
+    + staging buffer is the same as vertex buffer's except buffer size
+    + index buffer change this
+        + `usage`$\Leftarrow$`VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT`
+    + map memory and copy data, then unmap it
+    + copy buffer
+    + destroy staging buffer
+    + free staging buffer memory
++ bind index buffer after you bind the vertex buffer when you `recordCommandBuffer`
+    + the last parameter specifies the value type of per-index. Its possible values are as follows:
+        + `VK_INDEX_TYPE_UINT16` specifies that indices are 16-bit unsigned integer values
+        + `VK_INDEX_TYPE_UINT32` specifies that indices are 32-bit unsigned integer value
+        + `VK_INDEX_TYPE_NONE_KHR` specifies that no indices are provided
+        + `VK_INDEX_TYPE_UINT8_EXT` specifies that indices are 8-bit unsigned integer values
++ change the `vkCmdDraw` to `vkCmdDrawIndexed`
+    + `.indexCount` is the number of vertices to draw.
+    + `.instanceCount` is the number of instances to draw.
+    + `.firstIndex` is the base index within the index buffer.
+    + `.vertexOffset` is the value added to the vertex index before indexing into the vertex buffer.
+    + `.firstInstance` is the instance ID of the first instance to draw.
++ destroy index buffer when you clean up
++ free vertex index memory when you clean up
+### uniform buffer
++ usage of descriptors consists of three parts:
+    + Specify a descriptor set layout during pipeline creation
+    + Allocate a descriptor set from a descriptor pool
+    + Bind the descriptor set during rendering
+The *descriptor set layout* specifies the types of resources that are going to be accessed by the pipeline, just like a render pass specifies the types of attachments that will be accessed. A *descriptor set* specifies the actual buffer or image resources that will be bound to the descriptors, just like a framebuffer specifies the actual image views to bind to render pass attachments. The *descriptor set* is then bound for the drawing commands just like the vertex buffers and framebuffer.
++ descriptor set layout and uniform buffer
+    The basic uniform buffer object should contain *model view proj* matrices. CHange vertex shader to specify uniforms.
+    ```glsl
+    layout(binding = 0) uniform UniformBufferObject {
+        mat4 model;
+        mat4 view;
+        mat4 proj;
+    }ubo;
+    ...
+    gl_Position = ubo.proj * ubo.view * ubo.model * vec4(inPosition,0.0f,1.0f);
+    ```
+    + The next step is to define the UBO on the C++ side and to tell Vulkan about this descriptor in the vertex shader.
+    ```c++
+    struct UniformBufferObject
+    {
+        glm::mat4 model;
+        glm::mat4 view;
+        glm::mat4 proj;
+    };
+    ```
+    We can exactly match the definition in the shader using data types in GLM. The data in the matrices is binary compatible with the way the shader expects it, so we can later just `memcpy` a UniformBufferObject to a `VkBuffer`.
+    + Like vertex buffer and index buffer before, we need to provide details about every binding used in the shaders for pipeline creation, but unlike vertex buffer and index buffer, we need to create descriptor set layout explicitly with function `vkCreateDescriptorSetLayout`, starting from complete `VkDescriptorSetLayoutBinding` struct.
+        + `.binding` is the binding number which corresponds to the same binding number in the shader stages.
+        + `.descriptorType` specifies which type of resource descriptors are used for this binding.
+        + `.pImmutableSamplers` is only relevant for image sampling related descriptors.
+    + After creating descriptor set layout, we need to specify the descriptor set layout during pipeline creation to tell Vulkan which descriptors the shaders will be using in the pipeline layout object. And don't forget destroy it when you cleanup.
+    ```c++
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &m_DescriptorSetLayout;
+    ```
+    + Next create uniform buffers for each frame. We map the buffer right after creation using `vkMapMemory` to get a pointer to which we can write the data later on. The buffer stays mapped to this pointer for the application's whole lifetime. This technique is called **"persistent mapping"** and works on all Vulkan implementations. Not having to map the buffer every time we need to update it increases performances, as mapping is not free.
+    ```c++
+    void createUniformBuffers()
+        {
+            VkDeviceSize bufferSize = sizeof(UniformBufferObject);
+
+            m_UniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            m_UniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+            m_UniformBufferMapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+            {
+                createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                             m_UniformBuffers[i], m_UniformBuffersMemory[i]);
+                vkMapMemory(m_Device, m_UniformBuffersMemory[i], 0, bufferSize, 0, &m_UniformBufferMapped[i]);
+            }
+        }
+    ```
+    + updating uniform data
+        + Updating ubiform data is to set the uniform data, and `memcpy` data to the unfiform buffer memory we have allocated.
++ descriptor pool
+    + Descriptor sets can't be created directly, they must be allocated from a pool like command buffers.
+        + complete descriptor pool size struct
+        ```c++
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        ```
+        + complete descriptor pool create info struct
+            + `.maxSets` is the maximum number of descriptor sets that can be allocated from the pool.
+            + `.flag` is a bitmask of `VkDescriptorPoolCreateFlagBits` specifying certain supported operations on the pool. An optional flag similar to command pools that determines if individual descriptor sets can be freed or not: `VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT`
+    + create descriptor sets
+        + complete descriptor set allocate info strct
+            + `.descriptorSetCount` determines the number of descriptor sets to be allocated from the pool.
+            + `.pSetLayouts` is a pointer to an array of descriptor set layouts, with each member specifying how the corresponding descriptor set is allocated.
+        + complete descriptor buffer info struct
+            + `.buffer` is `VK_NULL_HANDLE` or the buffer resource.
+            + `.offset` is the offset in bytes from the start of buffer.
+            + `.range` is the size in bytes that is used for this descriptor update, or VK_WHOLE_SIZE to use the range from offset to the end of the buffer.
+        + complete write descriptor set struct
+            + `.dstSet` is the destination descriptor set to update.
+            + `.dstBinding` is the descriptor binding within that set.
+            + `.dstArrayElement`:Descriptors can be arrays, so we also need to specify the first index in the array that we want to update. We're not using an array, so the index is simply `0`.
+            + `.pImageInfo` is used for descriptors that refer to image data.
+            + `.pTexelBufferView` is used for descriptors that refer to buffer views.
+            + `.pBufferInfo` is used for descriptor that refer to buffer data.
++ update our uniform buffers
+    + set all of the uniform buffer object correctly, and `memcpy` the memory into our already mapped memory for uniform buffer memory.
+    ```c++
+    UniformBufferObject ubo{};
+    ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    ubo.proj = glm::perspective(glm::radians(45.0f), m_SwapChainImageExtent.width / static_cast<float>(m_SwapChainImageExtent.height), 0.1f, 10.0f);
+    ubo.proj[1][1] *= -1; // flip the Y axis
+    memcpy(m_UniformBufferMapped[currentImage], &ubo, sizeof(UniformBufferObject));
+    ```
++ Before our `vkCmdDrawIndexed` function, bind our descriptor set by function `vkCmdBindDescriptorSets`.
+        + **Note that we have flipped the Y axis, we need to change our `.cullMode` and `.frontFace` in  the `VkPipelineRasterizationStateCreateInfo` stage so that we can get our content.**
+        ```c++
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        ```
++ We need to update our uniform buffer before we record our command buffer, because will bind our descriptor sets in the record command buffer stage.
+```c++
+void drawFrames()
+    {
+        ...
+        updateUniformBuffer(m_CurrentFrame);
+        vkResetCommandBuffer(m_CommandBuffers[m_CurrentFrame], /*VkCommandBufferResetFlagBits*/ 0);
+        recordCommandBuffer(m_CommandBuffers[m_CurrentFrame], imageIndex);
+        ...
+    }
+```
