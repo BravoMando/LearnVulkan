@@ -15,4 +15,15 @@ add_custom_target(
 add_executable(main.out main.cpp)
 
 target_compile_definitions(main.out PUBLIC CURRENT_DIR="${PROJECT_SOURCE_DIR}/")
-target_link_libraries(main.out -lglfw -lvulkan)
+
+if(MSVC)
+    target_link_directories(main.out PRIVATE E:/VSCODE/github/Utils/glfw-3.3.8.bin.WIN64/glfw-3.3.8.bin.WIN64/lib-vc2022)
+elseif(MINGW)
+    target_link_directories(main.out PRIVATE E:/VSCODE/github/Utils/glfw-3.3.8.bin.WIN64/glfw-3.3.8.bin.WIN64/lib-mingw-w64)
+endif()
+
+target_include_directories(main.out PRIVATE E:/VSCODE/github/Utils/glfw-3.3.8.bin.WIN64/glfw-3.3.8.bin.WIN64/include)
+target_include_directories(main.out PRIVATE $ENV{VULKAN_SDK}/Include)
+target_include_directories(main.out PRIVATE E:/VSCODE/github/Utils/glm)
+target_link_directories(main.out PRIVATE $ENV{VULKAN_SDK}/Lib)
+target_link_libraries(main.out PRIVATE glfw3 vulkan-1)
